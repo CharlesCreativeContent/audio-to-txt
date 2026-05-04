@@ -172,11 +172,39 @@
       border: 1px solid #2d4d2d;
     }
 
+    #btn-cancel {
+      background: #3a1a1a;
+      color: var(--danger);
+      border: 1px solid #5a2a2a;
+      display: none;
+    }
+
     #btn-clear {
       background: var(--surface2);
       color: var(--muted);
       border: 1px solid var(--border);
       margin-left: auto;
+    }
+
+    /* Chunk progress bar */
+    #chunk-progress-wrap {
+      margin-top: 0.75rem;
+      display: none;
+    }
+    #chunk-progress-wrap.visible { display: block; }
+    #chunk-bar {
+      width: 100%;
+      height: 4px;
+      background: var(--surface2);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    #chunk-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 999px;
+      width: 0%;
+      transition: width 0.4s ease;
     }
 
     /* Audio preview */
@@ -320,12 +348,21 @@
     <button id="btn-copy">Copy</button>
   </div>
   <div id="transcript-status"></div>
+  <div id="chunk-progress-wrap">
+    <div id="chunk-bar"><div id="chunk-fill"></div></div>
+  </div>
   <div class="controls" style="margin-top:1rem;">
     <button id="btn-transcribe" disabled>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
       </svg>
       Transcribe
+    </button>
+    <button id="btn-cancel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+      Cancel
     </button>
     <button id="btn-clear">Clear</button>
   </div>
@@ -339,93 +376,112 @@
 
 <script type="module">
   // ---------------------------------------------------------------------------
-  // Imports — transformers.js runs Whisper entirely in the browser via WASM
+  // Web Worker source — runs Whisper inference off the main thread so the
+  // browser never freezes, even for long files.
   // ---------------------------------------------------------------------------
-  import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+  const WORKER_SRC = `
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+env.allowLocalModels = false;
+env.useBrowserCache  = true;
 
-  // Tell transformers.js to use browser cache and skip server-side checks
-  env.allowLocalModels = false;
-  env.useBrowserCache  = true;
+let pipe = null;
+
+self.onmessage = async ({ data: msg }) => {
+  if (msg.type === 'load') {
+    try {
+      pipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+        progress_callback: (p) => self.postMessage({ type: 'model_progress', payload: p })
+      });
+      self.postMessage({ type: 'model_ready' });
+    } catch (e) {
+      self.postMessage({ type: 'error', payload: e.message });
+    }
+  }
+
+  if (msg.type === 'transcribe') {
+    try {
+      // msg.audio is a Float32Array transferred from the main thread (zero-copy)
+      let chunksDone = 0;
+      await pipe(msg.audio, {
+        sampling_rate:    16000,
+        language:         'english',
+        task:             'transcribe',
+        chunk_length_s:   30,
+        stride_length_s:  5,
+        return_timestamps: false,
+        chunk_callback: (chunk) => {
+          chunksDone++;
+          self.postMessage({
+            type: 'chunk',
+            payload: { text: chunk.text, index: chunksDone, total: msg.totalChunks }
+          });
+        }
+      });
+      self.postMessage({ type: 'done' });
+    } catch (e) {
+      self.postMessage({ type: 'error', payload: e.message });
+    }
+  }
+};
+  `;
+
+  // ---------------------------------------------------------------------------
+  // Worker lifecycle helpers
+  // ---------------------------------------------------------------------------
+  function spawnWorker() {
+    const blob = new Blob([WORKER_SRC], { type: 'text/javascript' });
+    return new Worker(URL.createObjectURL(blob), { type: 'module' });
+  }
+
+  let worker = spawnWorker();
+  let workerReady = false;
 
   // ---------------------------------------------------------------------------
   // DOM refs
   // ---------------------------------------------------------------------------
-  const statusDot      = document.getElementById('status-dot');
-  const statusText     = document.getElementById('status-text');
-  const modelProgress  = document.getElementById('model-progress');
-  const progressLabel  = document.getElementById('progress-label');
+  const statusDot         = document.getElementById('status-dot');
+  const statusText        = document.getElementById('status-text');
+  const modelProgress     = document.getElementById('model-progress');
+  const progressLabel     = document.getElementById('progress-label');
 
-  const btnRecord      = document.getElementById('btn-record');
-  const btnUpload      = document.getElementById('btn-upload');
-  const fileInput      = document.getElementById('file-input');
-  const audioPreview   = document.getElementById('audio-preview');
-  const audioPreviewWrap = document.getElementById('audio-preview-wrap');
-  const audioFilename  = document.getElementById('audio-filename');
+  const btnRecord         = document.getElementById('btn-record');
+  const btnUpload         = document.getElementById('btn-upload');
+  const fileInput         = document.getElementById('file-input');
+  const audioPreview      = document.getElementById('audio-preview');
+  const audioPreviewWrap  = document.getElementById('audio-preview-wrap');
+  const audioFilename     = document.getElementById('audio-filename');
 
-  const transcript     = document.getElementById('transcript');
-  const transcriptStatus = document.getElementById('transcript-status');
-  const btnTranscribe  = document.getElementById('btn-transcribe');
-  const btnClear       = document.getElementById('btn-clear');
-  const btnCopy        = document.getElementById('btn-copy');
+  const transcript        = document.getElementById('transcript');
+  const transcriptStatus  = document.getElementById('transcript-status');
+  const btnTranscribe     = document.getElementById('btn-transcribe');
+  const btnCancel         = document.getElementById('btn-cancel');
+  const btnClear          = document.getElementById('btn-clear');
+  const btnCopy           = document.getElementById('btn-copy');
+  const chunkProgressWrap = document.getElementById('chunk-progress-wrap');
+  const chunkFill         = document.getElementById('chunk-fill');
 
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
-  let transcriber = null;
-  let audioBlob   = null;
+  let audioBlob     = null;
   let mediaRecorder = null;
   let recordChunks  = [];
   let isRecording   = false;
+  let isBusy        = false;
 
   // ---------------------------------------------------------------------------
-  // Load model
+  // Worker message handler (single source of truth)
   // ---------------------------------------------------------------------------
   function setStatus(state, text) {
-    statusDot.className = 'dot ' + state;
+    statusDot.className   = 'dot ' + state;
     statusText.textContent = text;
   }
-
-  (async () => {
-    try {
-      transcriber = await pipeline(
-        'automatic-speech-recognition',
-        'Xenova/whisper-tiny',
-        {
-          progress_callback: ({ status, name, progress, loaded, total }) => {
-            if (status === 'downloading') {
-              const pct = progress ? Math.round(progress) : 0;
-              const mb  = total ? (total / 1e6).toFixed(1) : '?';
-              modelProgress.classList.add('visible');
-              progressLabel.classList.add('visible');
-              modelProgress.value = pct;
-              progressLabel.textContent = `Downloading ${name} — ${pct}% of ${mb} MB`;
-            }
-            if (status === 'loading') {
-              setStatus('loading', 'Loading model into memory…');
-            }
-          }
-        }
-      );
-
-      modelProgress.classList.remove('visible');
-      progressLabel.classList.remove('visible');
-      setStatus('ready', 'Whisper tiny model ready');
-      btnRecord.disabled   = false;
-      btnUpload.disabled   = false;
-    } catch (err) {
-      setStatus('error', 'Failed to load model: ' + err.message);
-      console.error(err);
-    }
-  })();
 
   // ---------------------------------------------------------------------------
   // Recording
   // ---------------------------------------------------------------------------
   btnRecord.addEventListener('click', async () => {
-    if (isRecording) {
-      mediaRecorder.stop();
-      return;
-    }
+    if (isRecording) { mediaRecorder.stop(); return; }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -439,10 +495,9 @@
         isRecording = false;
         btnRecord.classList.remove('recording');
         btnRecord.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg> Record`;
-
         audioBlob = new Blob(recordChunks, { type: 'audio/webm' });
         const url = URL.createObjectURL(audioBlob);
-        audioPreview.src = url;
+        audioPreview.src         = url;
         audioFilename.textContent = 'Recorded audio';
         audioPreviewWrap.classList.add('visible');
         btnTranscribe.disabled = false;
@@ -466,53 +521,135 @@
     const file = fileInput.files[0];
     if (!file) return;
     audioBlob = file;
-    const url = URL.createObjectURL(file);
-    audioPreview.src = url;
-    audioFilename.textContent = file.name;
+    audioPreview.src          = URL.createObjectURL(file);
+    audioFilename.textContent  = file.name;
     audioPreviewWrap.classList.add('visible');
     btnTranscribe.disabled = false;
     fileInput.value = '';
   });
 
   // ---------------------------------------------------------------------------
-  // Transcription
+  // Transcription — decode on main thread, inference in worker
   // ---------------------------------------------------------------------------
   btnTranscribe.addEventListener('click', async () => {
-    if (!audioBlob || !transcriber) return;
+    if (!audioBlob || !workerReady || isBusy) return;
 
+    isBusy = true;
     btnTranscribe.disabled = true;
     btnRecord.disabled     = true;
     btnUpload.disabled     = true;
-    transcript.value       = '';
-    transcriptStatus.innerHTML = '<span class="spinner"></span>Transcribing locally…';
+    btnCancel.style.display = 'inline-flex';
+    transcript.value        = '';
+    chunkFill.style.width   = '0%';
+    chunkProgressWrap.classList.add('visible');
+    transcriptStatus.innerHTML = '<span class="spinner"></span>Decoding audio…';
 
     try {
+      // Decode in main thread — AudioContext is not available in workers
       const arrayBuffer = await audioBlob.arrayBuffer();
       const audioCtx    = new AudioContext({ sampleRate: 16000 });
       const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
+      audioCtx.close();
 
-      // Downmix to mono Float32Array at 16 kHz (Whisper's expected format)
-      const channelData = decoded.getChannelData(0);
+      // Mono Float32Array at 16 kHz
+      const audioData = decoded.getChannelData(0).slice(); // slice() gives us a copy we can transfer
 
-      const output = await transcriber(channelData, {
-        language:          'english',
-        task:              'transcribe',
-        chunk_length_s:    30,
-        stride_length_s:   5,
-        return_timestamps: false,
-      });
+      // Estimate chunk count so the progress bar has a denominator
+      const CHUNK_S  = 30;
+      const STRIDE_S = 5;
+      const totalChunks = Math.ceil(decoded.duration / (CHUNK_S - STRIDE_S));
 
-      transcript.value = output.text.trim();
-      transcriptStatus.textContent = 'Done — ' + wordCount(output.text) + ' words';
+      transcriptStatus.innerHTML = `<span class="spinner"></span>Sending to worker (${(audioData.byteLength / 1e6).toFixed(1)} MB)…`;
+
+      // Transfer the buffer — zero-copy move to worker, frees main-thread RAM
+      worker.postMessage(
+        { type: 'transcribe', audio: audioData, totalChunks },
+        [audioData.buffer]
+      );
     } catch (err) {
-      transcriptStatus.textContent = 'Error: ' + err.message;
-      console.error(err);
-    } finally {
-      btnTranscribe.disabled = false;
-      btnRecord.disabled     = false;
-      btnUpload.disabled     = false;
+      transcriptStatus.textContent = 'Decode error: ' + err.message;
+      finishTranscription(false);
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // Cancel — terminate worker, spawn fresh one and reload model
+  // ---------------------------------------------------------------------------
+  btnCancel.addEventListener('click', () => {
+    worker.terminate();
+    worker      = spawnWorker();
+    workerReady = false;
+    attachWorkerHandler();
+    worker.postMessage({ type: 'load' });
+    transcriptStatus.textContent = 'Cancelled.';
+    finishTranscription(true);
+  });
+
+  function attachWorkerHandler() {
+    worker.onmessage = ({ data: msg }) => {
+      switch (msg.type) {
+        case 'model_progress': {
+          const { status, name, progress, total } = msg.payload;
+          if (status === 'downloading') {
+            const pct = progress ? Math.round(progress) : 0;
+            const mb  = total ? (total / 1e6).toFixed(1) : '?';
+            modelProgress.classList.add('visible');
+            progressLabel.classList.add('visible');
+            modelProgress.value       = pct;
+            progressLabel.textContent = `Downloading ${name} — ${pct}% of ${mb} MB`;
+          }
+          if (status === 'loading') setStatus('loading', 'Loading model into memory…');
+          break;
+        }
+        case 'model_ready':
+          modelProgress.classList.remove('visible');
+          progressLabel.classList.remove('visible');
+          setStatus('ready', 'Whisper tiny model ready');
+          workerReady = true;
+          if (!isBusy) { btnRecord.disabled = false; btnUpload.disabled = false; }
+          break;
+        case 'chunk': {
+          const { text, index, total } = msg.payload;
+          transcript.value += (transcript.value ? ' ' : '') + text.trim();
+          transcript.scrollTop = transcript.scrollHeight;
+          const pct = total > 0 ? Math.round((index / total) * 100) : 0;
+          chunkFill.style.width = pct + '%';
+          transcriptStatus.innerHTML = `<span class="spinner"></span>Chunk ${index} of ~${total} (${pct}%)`;
+          break;
+        }
+        case 'done':  finishTranscription(false); break;
+        case 'error':
+          transcriptStatus.textContent = 'Error: ' + msg.payload;
+          finishTranscription(false);
+          break;
+      }
+    };
+    worker.onerror = (e) => {
+      transcriptStatus.textContent = 'Worker error: ' + e.message;
+      finishTranscription(false);
+    };
+  }
+
+  // Wire up handler and start model load
+  attachWorkerHandler();
+  worker.postMessage({ type: 'load' });
+
+  // ---------------------------------------------------------------------------
+  // Shared finish helper
+  // ---------------------------------------------------------------------------
+  function finishTranscription(cancelled) {
+    isBusy = false;
+    btnTranscribe.disabled  = !audioBlob;
+    btnRecord.disabled      = false;
+    btnUpload.disabled      = false;
+    btnCancel.style.display = 'none';
+    chunkProgressWrap.classList.remove('visible');
+    chunkFill.style.width = '0%';
+    if (!cancelled && transcript.value) {
+      transcriptStatus.textContent =
+        'Done — ' + wordCount(transcript.value) + ' words';
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Copy & Clear
@@ -525,13 +662,14 @@
   });
 
   btnClear.addEventListener('click', () => {
-    transcript.value = '';
+    if (isBusy) return;
+    transcript.value          = '';
     transcriptStatus.textContent = '';
-    audioBlob = null;
-    audioPreview.src = '';
+    audioBlob                 = null;
+    audioPreview.src          = '';
     audioPreviewWrap.classList.remove('visible');
-    audioFilename.textContent = '';
-    btnTranscribe.disabled = true;
+    audioFilename.textContent  = '';
+    btnTranscribe.disabled    = true;
   });
 
   // ---------------------------------------------------------------------------
