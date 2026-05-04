@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local Audio Transcription</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3347;
+      --accent: #6c8aff;
+      --accent-dim: #3a4a8a;
+      --text: #e2e6f3;
+      --muted: #7a82a0;
+      --danger: #ff6b6b;
+      --green: #4ade80;
+      --radius: 12px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    header p {
+      color: var(--muted);
+      margin-top: 0.4rem;
+      font-size: 0.9rem;
+    }
+
+    .privacy-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: #1a2e1a;
+      border: 1px solid #2d4d2d;
+      color: var(--green);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      margin-top: 0.8rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 700px;
+      margin-bottom: 1rem;
+    }
+
+    .card h2 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+
+    /* Model loader */
+    #model-status {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+    }
+    .dot.loading { background: var(--accent); animation: pulse 1s infinite; }
+    .dot.ready   { background: var(--green); }
+    .dot.error   { background: var(--danger); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    progress {
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      overflow: hidden;
+      appearance: none;
+      background: var(--surface2);
+      margin-top: 0.75rem;
+      display: none;
+    }
+    progress::-webkit-progress-bar   { background: var(--surface2); }
+    progress::-webkit-progress-value { background: var(--accent); transition: width 0.2s; }
+    progress::-moz-progress-bar      { background: var(--accent); }
+    progress.visible { display: block; }
+
+    #progress-label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.4rem;
+      display: none;
+    }
+    #progress-label.visible { display: block; }
+
+    /* Recording controls */
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.6rem 1.2rem;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #btn-record {
+      background: var(--accent);
+      color: #fff;
+    }
+    #btn-record.recording {
+      background: var(--danger);
+      animation: pulse 1.2s infinite;
+    }
+
+    #btn-upload {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    #btn-transcribe {
+      background: #1e3a1e;
+      color: var(--green);
+      border: 1px solid #2d4d2d;
+    }
+
+    #btn-clear {
+      background: var(--surface2);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      margin-left: auto;
+    }
+
+    /* Audio preview */
+    #audio-preview-wrap { margin-top: 1rem; display: none; }
+    #audio-preview-wrap.visible { display: block; }
+
+    audio {
+      width: 100%;
+      border-radius: 8px;
+      accent-color: var(--accent);
+    }
+
+    #audio-filename {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.4rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Transcription output */
+    #transcript-wrap { position: relative; }
+
+    #transcript {
+      width: 100%;
+      min-height: 180px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      color: var(--text);
+      font-size: 1rem;
+      line-height: 1.6;
+      resize: vertical;
+      font-family: inherit;
+    }
+    #transcript:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    #transcript-status {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      min-height: 1.2em;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--muted);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.3rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #btn-copy {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.78rem;
+      padding: 0.3rem 0.7rem;
+    }
+    #btn-copy:hover { color: var(--text); }
+
+    /* File input hidden */
+    #file-input { display: none; }
+
+    /* Footer */
+    footer {
+      margin-top: 1.5rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+      max-width: 600px;
+    }
+    footer strong { color: var(--text); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Local Audio Transcription</h1>
+  <p>Powered by OpenAI Whisper running entirely in your browser</p>
+  <span class="privacy-badge">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
+    </svg>
+    100% local — no server, no data collection
+  </span>
+</header>
+
+<!-- Model status -->
+<div class="card">
+  <h2>Model</h2>
+  <div id="model-status">
+    <div class="dot loading" id="status-dot"></div>
+    <span id="status-text">Downloading Whisper model (first load only, ~40 MB)…</span>
+  </div>
+  <progress id="model-progress" max="100" value="0"></progress>
+  <div id="progress-label"></div>
+</div>
+
+<!-- Recording / Upload -->
+<div class="card">
+  <h2>Audio Input</h2>
+  <div class="controls">
+    <button id="btn-record" disabled>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="12" cy="12" r="8"/>
+      </svg>
+      Record
+    </button>
+    <button id="btn-upload" disabled>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      Upload File
+    </button>
+    <input type="file" id="file-input" accept="audio/*,video/*" />
+  </div>
+
+  <div id="audio-preview-wrap">
+    <div id="audio-filename"></div>
+    <audio id="audio-preview" controls></audio>
+  </div>
+</div>
+
+<!-- Transcription output -->
+<div class="card">
+  <h2>Transcript</h2>
+  <div id="transcript-wrap">
+    <textarea id="transcript" placeholder="Transcript will appear here…" readonly></textarea>
+    <button id="btn-copy">Copy</button>
+  </div>
+  <div id="transcript-status"></div>
+  <div class="controls" style="margin-top:1rem;">
+    <button id="btn-transcribe" disabled>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+      </svg>
+      Transcribe
+    </button>
+    <button id="btn-clear">Clear</button>
+  </div>
+</div>
+
+<footer>
+  <strong>Privacy:</strong> Your audio is processed entirely on your device using WebAssembly.
+  The Whisper model weights are downloaded once from Hugging Face and cached in your browser —
+  after that this page works fully offline. No audio or text is ever sent to any server.
+</footer>
+
+<script type="module">
+  // ---------------------------------------------------------------------------
+  // Imports — transformers.js runs Whisper entirely in the browser via WASM
+  // ---------------------------------------------------------------------------
+  import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+  // Tell transformers.js to use browser cache and skip server-side checks
+  env.allowLocalModels = false;
+  env.useBrowserCache  = true;
+
+  // ---------------------------------------------------------------------------
+  // DOM refs
+  // ---------------------------------------------------------------------------
+  const statusDot      = document.getElementById('status-dot');
+  const statusText     = document.getElementById('status-text');
+  const modelProgress  = document.getElementById('model-progress');
+  const progressLabel  = document.getElementById('progress-label');
+
+  const btnRecord      = document.getElementById('btn-record');
+  const btnUpload      = document.getElementById('btn-upload');
+  const fileInput      = document.getElementById('file-input');
+  const audioPreview   = document.getElementById('audio-preview');
+  const audioPreviewWrap = document.getElementById('audio-preview-wrap');
+  const audioFilename  = document.getElementById('audio-filename');
+
+  const transcript     = document.getElementById('transcript');
+  const transcriptStatus = document.getElementById('transcript-status');
+  const btnTranscribe  = document.getElementById('btn-transcribe');
+  const btnClear       = document.getElementById('btn-clear');
+  const btnCopy        = document.getElementById('btn-copy');
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  let transcriber = null;
+  let audioBlob   = null;
+  let mediaRecorder = null;
+  let recordChunks  = [];
+  let isRecording   = false;
+
+  // ---------------------------------------------------------------------------
+  // Load model
+  // ---------------------------------------------------------------------------
+  function setStatus(state, text) {
+    statusDot.className = 'dot ' + state;
+    statusText.textContent = text;
+  }
+
+  (async () => {
+    try {
+      transcriber = await pipeline(
+        'automatic-speech-recognition',
+        'Xenova/whisper-tiny',
+        {
+          progress_callback: ({ status, name, progress, loaded, total }) => {
+            if (status === 'downloading') {
+              const pct = progress ? Math.round(progress) : 0;
+              const mb  = total ? (total / 1e6).toFixed(1) : '?';
+              modelProgress.classList.add('visible');
+              progressLabel.classList.add('visible');
+              modelProgress.value = pct;
+              progressLabel.textContent = `Downloading ${name} — ${pct}% of ${mb} MB`;
+            }
+            if (status === 'loading') {
+              setStatus('loading', 'Loading model into memory…');
+            }
+          }
+        }
+      );
+
+      modelProgress.classList.remove('visible');
+      progressLabel.classList.remove('visible');
+      setStatus('ready', 'Whisper tiny model ready');
+      btnRecord.disabled   = false;
+      btnUpload.disabled   = false;
+    } catch (err) {
+      setStatus('error', 'Failed to load model: ' + err.message);
+      console.error(err);
+    }
+  })();
+
+  // ---------------------------------------------------------------------------
+  // Recording
+  // ---------------------------------------------------------------------------
+  btnRecord.addEventListener('click', async () => {
+    if (isRecording) {
+      mediaRecorder.stop();
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordChunks  = [];
+      mediaRecorder = new MediaRecorder(stream);
+
+      mediaRecorder.ondataavailable = e => { if (e.data.size) recordChunks.push(e.data); };
+
+      mediaRecorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        isRecording = false;
+        btnRecord.classList.remove('recording');
+        btnRecord.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg> Record`;
+
+        audioBlob = new Blob(recordChunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(audioBlob);
+        audioPreview.src = url;
+        audioFilename.textContent = 'Recorded audio';
+        audioPreviewWrap.classList.add('visible');
+        btnTranscribe.disabled = false;
+      };
+
+      mediaRecorder.start();
+      isRecording = true;
+      btnRecord.classList.add('recording');
+      btnRecord.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stop`;
+    } catch (err) {
+      alert('Microphone access denied: ' + err.message);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // File upload
+  // ---------------------------------------------------------------------------
+  btnUpload.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    audioBlob = file;
+    const url = URL.createObjectURL(file);
+    audioPreview.src = url;
+    audioFilename.textContent = file.name;
+    audioPreviewWrap.classList.add('visible');
+    btnTranscribe.disabled = false;
+    fileInput.value = '';
+  });
+
+  // ---------------------------------------------------------------------------
+  // Transcription
+  // ---------------------------------------------------------------------------
+  btnTranscribe.addEventListener('click', async () => {
+    if (!audioBlob || !transcriber) return;
+
+    btnTranscribe.disabled = true;
+    btnRecord.disabled     = true;
+    btnUpload.disabled     = true;
+    transcript.value       = '';
+    transcriptStatus.innerHTML = '<span class="spinner"></span>Transcribing locally…';
+
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const audioCtx    = new AudioContext({ sampleRate: 16000 });
+      const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // Downmix to mono Float32Array at 16 kHz (Whisper's expected format)
+      const channelData = decoded.getChannelData(0);
+
+      const output = await transcriber(channelData, {
+        language:          'english',
+        task:              'transcribe',
+        chunk_length_s:    30,
+        stride_length_s:   5,
+        return_timestamps: false,
+      });
+
+      transcript.value = output.text.trim();
+      transcriptStatus.textContent = 'Done — ' + wordCount(output.text) + ' words';
+    } catch (err) {
+      transcriptStatus.textContent = 'Error: ' + err.message;
+      console.error(err);
+    } finally {
+      btnTranscribe.disabled = false;
+      btnRecord.disabled     = false;
+      btnUpload.disabled     = false;
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Copy & Clear
+  // ---------------------------------------------------------------------------
+  btnCopy.addEventListener('click', async () => {
+    if (!transcript.value) return;
+    await navigator.clipboard.writeText(transcript.value);
+    btnCopy.textContent = 'Copied!';
+    setTimeout(() => { btnCopy.textContent = 'Copy'; }, 1500);
+  });
+
+  btnClear.addEventListener('click', () => {
+    transcript.value = '';
+    transcriptStatus.textContent = '';
+    audioBlob = null;
+    audioPreview.src = '';
+    audioPreviewWrap.classList.remove('visible');
+    audioFilename.textContent = '';
+    btnTranscribe.disabled = true;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+  function wordCount(text) {
+    return text.trim().split(/\s+/).filter(Boolean).length;
+  }
+</script>
+</body>
+</html>
